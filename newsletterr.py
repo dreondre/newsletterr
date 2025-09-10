@@ -917,17 +917,33 @@ def generate_email_content(template_id, settings, date_range=7):
                 
                 if text_content:
                     if item_type == 'titleblock':
-                        all_content_html += f"""
-                        <div style="margin-bottom: 20px; font-size: 1.5em; font-weight: bold; text-align: center; color: #E5A00D;">
-                            {text_content.replace(chr(10), '<br>')}
-                        </div>
-                        """
+                        # Handle HTML content from Quill editor
+                        if '<' in text_content:
+                            all_content_html += f"""
+                            <div style="margin-bottom: 20px; font-size: 1.5em; font-weight: bold; color: #E5A00D;">
+                                {text_content}
+                            </div>
+                            """
+                        else:
+                            all_content_html += f"""
+                            <div style="margin-bottom: 20px; font-size: 1.5em; font-weight: bold; text-align: center; color: #E5A00D;">
+                                {text_content.replace(chr(10), '<br>')}
+                            </div>
+                            """
                     else:
-                        all_content_html += f"""
-                        <div style="margin-bottom: 15px; color: #fff;">
-                            {text_content.replace(chr(10), '<br>')}
-                        </div>
-                        """
+                        # Handle HTML content from Quill editor
+                        if '<' in text_content:
+                            all_content_html += f"""
+                            <div style="margin-bottom: 15px; color: #fff;">
+                                {text_content}
+                            </div>
+                            """
+                        else:
+                            all_content_html += f"""
+                            <div style="margin-bottom: 15px; color: #fff;">
+                                {text_content.replace(chr(10), '<br>')}
+                            </div>
+                            """
                 
             elif item_type == 'stat' and stats:
                 try:
@@ -1205,7 +1221,9 @@ def send_scheduled_email(schedule_id, email_list_id, template_id):
         return False
 
 def apply_layout(body, graphs_html_block, stats_html_block, ra_html_block, recs_html_block, subject, server_name):
-    body = body.replace('\n', '<br>')
+    # Handle HTML content from Quill editor - only convert newlines if content doesn't contain HTML
+    if '<' not in body:
+        body = body.replace('\n', '<br>')
     body = body.replace('[GRAPHS]', graphs_html_block)
     body = body.replace('[STATS]', stats_html_block)
     body = body.replace('[RECENTLY_ADDED]', ra_html_block)
@@ -1215,8 +1233,34 @@ def apply_layout(body, graphs_html_block, stats_html_block, ra_html_block, recs_
         display_subject = subject[len(server_name):].lstrip()
     else:
         display_subject = subject
+    
+    # Get logo settings from database
+    logo_src = "https://d15k2d11r6t6rl.cloudfront.net/public/users/Integrators/669d5713-9b6a-46bb-bd7e-c542cff6dd6a/3bef3c50f13f4320a9e31b8be79c6ad2/Plex%20Logo%20Update%202022/plex-logo-heavy-stroke.png"  # Default
+    logo_width = "40"  # Default
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT logo_filename, logo_width FROM settings WHERE id = 1")
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result and result[0]:
+            logo_filename = result[0]
+            logo_width = str(result[1]) if result[1] else "40"
+            
+            # Determine logo path based on filename
+            if logo_filename.startswith('logo_'):
+                # Uploaded logo
+                logo_src = f"/static/uploads/logos/{logo_filename}"
+            else:
+                # Static logo
+                logo_src = f"/static/img/{logo_filename}"
+    except Exception as e:
+        print(f"Error getting logo settings: {e}")
+        # Use default logo if there's an error
 
-    return f"""`
+    return f"""
     <link href="https://fonts.googleapis.com/css?family=IBM+Plex+Sans:400,500,600,700&display=swap" rel="stylesheet">
     <html>
     <style>
@@ -1255,7 +1299,7 @@ def apply_layout(body, graphs_html_block, stats_html_block, ra_html_block, recs_
                                 <tbody>
                                     <tr>
                                         <td class="wrapper" style="font-family: IBM Plex Sans; font-size: 14px; vertical-align: top; box-sizing: border-box; padding: 5px; overflow: auto;">
-                                            <div class="header" style="text-align: center; line-height: 0;"><img class="header-img plex-img" style="display: block; outline: 0; text-decoration: none; height: auto; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%; margin-left: 40em;" src="https://d15k2d11r6t6rl.cloudfront.net/public/users/Integrators/669d5713-9b6a-46bb-bd7e-c542cff6dd6a/3bef3c50f13f4320a9e31b8be79c6ad2/Plex%20Logo%20Update%202022/plex-logo-heavy-stroke.png" width="40" /></div>
+                                            <div class="header" style="text-align: center; line-height: 0;"><img class="header-img plex-img" style="display: block; outline: 0; text-decoration: none; height: auto; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%; margin-left: 40em;" src="{logo_src}" width="{logo_width}" /></div>
                                             <div class="server-name" style="font-size: 25px; text-align: center; margin-bottom: 0;">{server_name} Newsletter</div>
                                         </td>
                                     </tr>
@@ -1275,7 +1319,7 @@ def apply_layout(body, graphs_html_block, stats_html_block, ra_html_block, recs_
                     </td>
                 </tr>
             </tbody>
-        </table></body></html>`"""
+        </table></body></html>"""
 
 def run_tautulli_command(base_url, api_key, command, data_type, error, time_range='30'):
     out_data = None
@@ -2877,6 +2921,128 @@ def delete_email_template(template_id):
     except Exception as e:
         print(f"Error deleting template: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/upload-logo', methods=['POST'])
+def upload_logo():
+    """Handle logo file upload with validation"""
+    try:
+        # Check if file was uploaded
+        if 'logo' not in request.files:
+            return jsonify({"status": "error", "message": "No file uploaded"}), 400
+        
+        file = request.files['logo']
+        
+        # Check if file is empty
+        if file.filename == '':
+            return jsonify({"status": "error", "message": "No file selected"}), 400
+        
+        # Validate file type
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'webp'}
+        if not file.filename.lower().endswith(tuple('.' + ext for ext in allowed_extensions)):
+            return jsonify({"status": "error", "message": "Invalid file type. Only PNG, JPG, JPEG, and WebP are allowed"}), 400
+        
+        # Validate file size (max 2MB)
+        file.seek(0, 2)  # Seek to end
+        file_size = file.tell()
+        file.seek(0)  # Reset to beginning
+        
+        if file_size > 2 * 1024 * 1024:  # 2MB
+            return jsonify({"status": "error", "message": "File too large. Maximum size is 2MB"}), 400
+        
+        # Generate unique filename
+        timestamp = int(time.time())
+        file_extension = file.filename.rsplit('.', 1)[1].lower()
+        new_filename = f"logo_{timestamp}.{file_extension}"
+        
+        # Ensure upload directory exists
+        upload_dir = os.path.join(app.static_folder, 'uploads', 'logos')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save file
+        file_path = os.path.join(upload_dir, new_filename)
+        file.save(file_path)
+        
+        # Get image dimensions
+        try:
+            from PIL import Image
+            with Image.open(file_path) as img:
+                width, height = img.size
+                # Validate dimensions (max 800x400)
+                if width > 800 or height > 400:
+                    # Resize image if too large
+                    img.thumbnail((800, 400), Image.Resampling.LANCZOS)
+                    img.save(file_path, quality=95, optimize=True)
+                    width, height = img.size
+        except ImportError:
+            # PIL not available, skip dimension validation
+            width, height = 0, 0
+        
+        # Update database with new logo filename
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO settings (id, logo_filename, logo_width) 
+            VALUES (1, ?, ?) 
+            ON CONFLICT (id) DO UPDATE 
+            SET logo_filename = excluded.logo_filename, logo_width = excluded.logo_width
+        """, (new_filename, width))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "status": "success", 
+            "message": "Logo uploaded successfully",
+            "filename": new_filename,
+            "width": width,
+            "height": height
+        })
+        
+    except Exception as e:
+        print(f"Error uploading logo: {e}")
+        return jsonify({"status": "error", "message": f"Upload failed: {str(e)}"}), 500
+
+@app.route('/delete-logo', methods=['POST'])
+def delete_logo():
+    """Delete current logo and reset to default"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Get current logo filename
+        cursor.execute("SELECT logo_filename FROM settings WHERE id = 1")
+        result = cursor.fetchone()
+        current_logo = result[0] if result else None
+        
+        if current_logo and current_logo != 'Asset_45x.png':
+            # Delete the uploaded logo file
+            logo_path = os.path.join(app.static_folder, 'uploads', 'logos', current_logo)
+            if os.path.exists(logo_path):
+                os.remove(logo_path)
+            
+            # Reset to default logo
+            cursor.execute("""
+                UPDATE settings 
+                SET logo_filename = 'Asset_45x.png', logo_width = 80 
+                WHERE id = 1
+            """)
+            conn.commit()
+            
+            return jsonify({
+                "status": "success", 
+                "message": "Logo deleted and reset to default"
+            })
+        else:
+            return jsonify({
+                "status": "info", 
+                "message": "Already using default logo"
+            })
+            
+    except Exception as e:
+        print(f"Error deleting logo: {e}")
+        return jsonify({"status": "error", "message": f"Delete failed: {str(e)}"}), 500
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 if __name__ == '__main__':
     os.makedirs("database", exist_ok=True)

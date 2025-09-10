@@ -8,7 +8,7 @@
             <div class="card theme-card">
                 <div class="card-header theme-card-header d-flex justify-content-between align-items-center">
                     <h3 class="mb-0">📧 Email Preview - <span id="schedule-name"></span></h3>
-                    <button class="btn btn-primary" onclick="window.close()">Close Preview</button>
+                    <button class="btn btn-primary" id="close-preview-btn">Close Preview</button>
                 </div>
                 <div class="card-body">
                     <div id="loading" class="text-center p-4">
@@ -18,9 +18,9 @@
                         <p class="mt-2">Loading template data and generating preview...</p>
                     </div>
                     
-                    <div id="error" class="alert alert-danger" style="display: none;"></div>
+                    <div id="error" class="alert alert-danger error-hidden"></div>
                     
-                    <div id="preview-section" aria-hidden="true" style="opacity:0; z-index:-1;">
+                    <div id="preview-section" aria-hidden="true" class="preview-section-hidden">
                         <input type="hidden" id="subject" value="">
                         <input type="hidden" id="email_text" value="">
                         <input type="hidden" id="layout" value="standard">
@@ -34,15 +34,15 @@
                                         <h5 class="mb-0">📧 Email Preview</h5>
                                     </div>
                                     <div class="card-body">
-                                        <iframe id="preview" style="width: 100%; height: 600px; border: 1px solid #dee2e6; border-radius: 4px; background: white;"></iframe>
+                                        <iframe id="preview" class="preview-iframe"></iframe>
                                     </div>
                                 </div>
                             </div>
                         </div>
                         
-                        <div id="stats-container" style="display: none;"></div>
-                        <div id="graphs-container" style="display: none;"></div>
-                        <div id="workbench" style="position:fixed; left:-10000px; top:-10000px; width:1920px;"></div>
+                        <div id="stats-container" class="stats-container-hidden"></div>
+                        <div id="graphs-container" class="graphs-container-hidden"></div>
+                        <div id="workbench" class="workbench-hidden"></div>
                     </div>
                 </div>
             </div>
@@ -50,7 +50,7 @@
     </div>
 </div>
 
-<script>
+<script nonce="{{ nonce }}">
     const urlParams = new URLSearchParams(window.location.search);
     const scheduleId = urlParams.get('schedule_id');
 
@@ -1271,6 +1271,15 @@
         }
     }
 
-    document.addEventListener('DOMContentLoaded', loadPreview);
+    // Add event listener for close button
+    document.addEventListener('DOMContentLoaded', () => {
+        const closeBtn = document.getElementById('close-preview-btn');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => {
+                window.close();
+            });
+        }
+        loadPreview();
+    });
 </script>
 {% endblock %}
