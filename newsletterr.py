@@ -1,4 +1,5 @@
 import os, math, uuid, base64, smtplib, sqlite3, requests, time, threading, re, json, mimetypes, shutil, calendar, traceback
+from threading import Lock
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 from cryptography.fernet import Fernet, InvalidToken
@@ -10,10 +11,29 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.utils import make_msgid
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session, abort, make_response
+from functools import wraps
 import secrets
+import html
+try:
+    import bleach
+    HAS_BLEACH = True
+except ImportError:
+    HAS_BLEACH = False
+    print("Warning: bleach not available, XSS protection limited")
 from pathlib import Path
-from playwright.sync_api import sync_playwright
-from plex_api_client import PlexAPI
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+    print("Warning: playwright not available, chart generation disabled")
+
+try:
+    from plex_api_client import PlexAPI
+    HAS_PLEX_CLIENT = True
+except ImportError:
+    HAS_PLEX_CLIENT = False
+    print("Warning: plex-api-client not available")
 from urllib.parse import quote_plus, urljoin, urlparse
 
 app = Flask(__name__)
@@ -42,6 +62,100 @@ def require_csrf_for_json():
     token = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token')
     if not token or token != session.get('csrf_token'):
         abort(400)
+
+def sanitize_html_input(text):
+    """Sanitize HTML input to prevent XSS attacks"""
+    if not text:
+        return ""
+    
+    if HAS_BLEACH:
+        # Allowed tags for rich text editor
+        allowed_tags = [
+            'p', 'br', 'strong', 'b', 'em', 'i', 'u', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'ul', 'ol', 'li', 'blockquote', 'a', 'img', 'div', 'span'
+        ]
+        
+        # Allowed attributes
+        allowed_attributes = {
+            'a': ['href', 'title'],
+            'img': ['src', 'alt', 'title', 'width', 'height'],
+            'div': ['class'],
+            'span': ['class', 'style']
+        }
+        
+        # Allowed protocols for links
+        allowed_protocols = ['http', 'https', 'mailto']
+        
+        return bleach.clean(
+            text,
+            tags=allowed_tags,
+            attributes=allowed_attributes,
+            protocols=allowed_protocols,
+            strip=True
+        )
+    else:
+        # Fallback: basic HTML escaping (less secure but better than nothing)
+        print("Warning: Using basic HTML escaping instead of full sanitization")
+        return html.escape(text)
+
+def escape_html_output(text):
+    """Escape HTML for safe output"""
+    if not text:
+        return ""
+    return html.escape(text)
+
+# Basic Authentication System
+def requires_auth(f):
+    """Decorator for routes that require authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check if authentication is enabled
+        auth_enabled = os.getenv('NEWSLETTER_AUTH_ENABLED', 'false').lower() == 'true'
+        if not auth_enabled:
+            return f(*args, **kwargs)
+            
+        # Check session authentication
+        if not session.get('authenticated'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def check_credentials(username, password):
+    """Check if provided credentials are valid"""
+    expected_username = os.getenv('NEWSLETTER_USERNAME', 'admin')
+    expected_password = os.getenv('NEWSLETTER_PASSWORD')
+    
+    if not expected_password:
+        # No password set - authentication disabled
+        return False
+        
+    return username == expected_username and password == expected_password
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Basic login endpoint"""
+    # If auth is disabled, redirect to home
+    if os.getenv('NEWSLETTER_AUTH_ENABLED', 'false').lower() != 'true':
+        return redirect(url_for('index'))
+        
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        
+        if check_credentials(username, password):
+            session['authenticated'] = True
+            session['username'] = username
+            return redirect(url_for('index'))
+        else:
+            return render_template('login.html', error='Invalid credentials')
+    
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    """Logout endpoint"""
+    session.clear()
+    return redirect(url_for('login'))
 
 def safe_get(url: str, *, timeout: int = 15, retries: int = 2, **kwargs):
     """requests.get with timeout and minimal retry/backoff."""
@@ -171,6 +285,16 @@ _update_cache = {
 }
 
 DB_PATH = os.path.join("database", "data.db")
+
+# Thread-safe database operations
+db_lock = Lock()
+
+def get_db_connection():
+    """Get a database connection with proper timeout and configuration"""
+    conn = sqlite3.connect(DB_PATH, timeout=30.0, isolation_level=None)
+    conn.execute("PRAGMA busy_timeout = 30000")  # 30 second timeout
+    conn.execute("PRAGMA journal_mode = WAL")    # Write-Ahead Logging for better concurrency
+    return conn
 plex_headers = {
     "X-Plex-Client-Identifier": str(uuid.uuid4())
 }
@@ -486,36 +610,65 @@ def migrate_data_from_separate_dbs():
         unified_conn.close()
 
 def migrate_schema(column_def):
+    # Security: Whitelist allowed column definitions to prevent SQL injection
+    allowed_columns = {
+        'logo_filename TEXT': 'logo_filename TEXT',
+        'logo_width INTEGER': 'logo_width INTEGER',
+        'smtp_username TEXT': 'smtp_username TEXT',
+        'smtp_protocol TEXT': 'smtp_protocol TEXT',
+        'reply_to_email TEXT': 'reply_to_email TEXT'
+    }
+    
+    if column_def not in allowed_columns:
+        print(f"Security Warning: Attempted to add unauthorized column: {column_def}")
+        return
+    
     conn = sqlite3.connect(DB_PATH)
     try:
         col_name = column_def.split()[0]
         cursor = conn.execute("PRAGMA table_info('settings')")
         has_column = any(row[1] == col_name for row in cursor.fetchall())
         if not has_column:
-            conn.execute(f"ALTER TABLE settings ADD COLUMN {column_def}")
+            # Use whitelisted column definition
+            conn.execute(f"ALTER TABLE settings ADD COLUMN {allowed_columns[column_def]}")
             conn.commit()
+            print(f"Added column: {col_name}")
+    except sqlite3.Error as e:
+        print(f"Database error in migrate_schema: {e}")
     finally:
         conn.close()
 
 def get_saved_email_lists():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, emails FROM email_lists ORDER BY name")
-    lists = cursor.fetchall()
-    conn.close()
-    return [{'id': row[0], 'name': row[1], 'emails': row[2]} for row in lists]
+    """Thread-safe email list retrieval"""
+    with db_lock:
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, emails FROM email_lists ORDER BY name")
+            lists = cursor.fetchall()
+            return [{'id': row[0], 'name': row[1], 'emails': row[2]} for row in lists]
+        except sqlite3.Error as e:
+            print(f"Database error in get_saved_email_lists: {e}")
+            return []
+        finally:
+            conn.close()
 
 def save_email_list(name, emails):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO email_lists (name, emails) VALUES (?, ?)", (name, emails))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
-    finally:
-        conn.close()
+    """Thread-safe email list saving"""
+    with db_lock:
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO email_lists (name, emails) VALUES (?, ?)", (name, emails))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        except sqlite3.Error as e:
+            print(f"Database error in save_email_list: {e}")
+            return False
+        finally:
+            conn.close()
 
 def delete_email_list(list_id):
     conn = sqlite3.connect(DB_PATH)
@@ -1525,10 +1678,28 @@ def embed_local_imgs(html: str, static_root: str) -> tuple[str, list]:
 
         rel = src.lstrip("/")[7:]
         print(static_root, rel)
+        
+        # Security: Prevent path traversal attacks
         fs_path = os.path.normpath(os.path.join(static_root, rel))
+        
+        # Ensure the resolved path is within the static directory
+        if not fs_path.startswith(os.path.normpath(static_root)):
+            print(f"Security Warning: Path traversal attempt blocked: {rel}")
+            continue
+            
+        # Additional security: whitelist allowed file extensions
+        allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'}
+        file_ext = os.path.splitext(fs_path)[1].lower()
+        if file_ext not in allowed_extensions:
+            print(f"Security Warning: Unauthorized file type blocked: {file_ext}")
+            continue
 
-        with open(fs_path, "rb") as f:
-            data = f.read()
+        try:
+            with open(fs_path, "rb") as f:
+                data = f.read()
+        except (IOError, OSError) as e:
+            print(f"Error reading file {fs_path}: {e}")
+            continue
 
         mime, _ = mimetypes.guess_type(fs_path)
         if mime and mime.startswith("image/"):
@@ -1620,6 +1791,7 @@ def inject_update_info():
     }
 
 @app.route('/', methods=['GET', 'POST'])
+@requires_auth
 def index():
     stats = None
     users = None
