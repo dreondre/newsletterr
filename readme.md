@@ -173,7 +173,6 @@ Released under the **MIT License** – see [LICENSE](LICENSE) for details.
 ## Upcoming Changes
 
 ### v0.9.14 (Upcoming)
-
 * Some issue sending a second scheduled email
 * Recommendations/recently added headers bigger in scheduled send | grid 5 by x instead
 * Schedule send only sends dark mode
@@ -246,7 +245,6 @@ Released under the **MIT License** – see [LICENSE](LICENSE) for details.
 * **Testing:** Comprehensive security audit completed, code quality verified, smoke tests passed
 
 ### v0.9.13
-
 * Adjusted tautulli API error reporting
 * Fixed app crash when Tautulli settings are missing - thank you dreondre!
 * Reply-To field in settings

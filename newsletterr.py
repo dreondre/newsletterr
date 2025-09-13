@@ -44,8 +44,8 @@ if not app.secret_key:
         app.secret_key = secrets.token_hex(16) + secret_source[:16]
     except Exception:
         app.secret_key = secrets.token_hex(32)
-app.jinja_env.globals["version"] = "v0.9.14-dev"
-app.jinja_env.globals["publish_date"] = "September 10, 2025"
+app.jinja_env.globals["version"] = "v0.9.14"
+app.jinja_env.globals["publish_date"] = "September 13, 2025"
 @app.after_request
 def set_security_headers(resp: Response):
     try:
@@ -166,7 +166,6 @@ def safe_get(url: str, *, timeout: int = 15, retries: int = 2, **kwargs):
             if attempt == retries:
                 raise
             time.sleep(1.0 * (attempt + 1))
-
 
 def get_global_cache_status():
     """Get global cache status for display in navbar"""
