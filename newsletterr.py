@@ -9,15 +9,50 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.utils import make_msgid
-from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
+from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session, abort, make_response
+import secrets
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from plex_api_client import PlexAPI
 from urllib.parse import quote_plus, urljoin, urlparse
 
 app = Flask(__name__)
-app.jinja_env.globals["version"] = "v0.9.13"
-app.jinja_env.globals["publish_date"] = "September 01, 2025"
+if not app.secret_key:
+    # Derive a stable secret from DATA_ENC_KEY; fallback to random
+    try:
+        secret_source = os.getenv("DATA_ENC_KEY") or Fernet.generate_key().decode()
+        app.secret_key = secrets.token_hex(16) + secret_source[:16]
+    except Exception:
+        app.secret_key = secrets.token_hex(32)
+app.jinja_env.globals["version"] = "v0.9.14-dev"
+app.jinja_env.globals["publish_date"] = "September 10, 2025"
+@app.after_request
+def set_security_headers(resp: Response):
+    try:
+        resp.headers.setdefault('X-Frame-Options', 'DENY')
+        resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+        resp.headers.setdefault('Referrer-Policy', 'no-referrer')
+        # If running behind HTTPS, HSTS can be enabled by the operator
+        # resp.headers.setdefault('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload')
+        return resp
+    except Exception:
+        return resp
+
+def require_csrf_for_json():
+    token = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token')
+    if not token or token != session.get('csrf_token'):
+        abort(400)
+
+def safe_get(url: str, *, timeout: int = 15, retries: int = 2, **kwargs):
+    """requests.get with timeout and minimal retry/backoff."""
+    for attempt in range(retries + 1):
+        try:
+            return requests.get(url, timeout=timeout, **kwargs)
+        except requests.RequestException as e:
+            if attempt == retries:
+                raise
+            time.sleep(1.0 * (attempt + 1))
+
 
 def get_global_cache_status():
     """Get global cache status for display in navbar"""
@@ -1230,45 +1265,61 @@ def send_scheduled_email(schedule_id, email_list_id, template_id):
         traceback.print_exc()
         return False
 
+def sanitize_html(html: str) -> str:
+    # Minimal sanitizer; allow basic formatting and links
+    try:
+        import bleach
+        allowed_tags = [
+            'p','br','strong','em','b','i','u','ul','ol','li','a','h1','h2','h3','h4','h5','h6',
+            'blockquote','code','pre','span'
+        ]
+        allowed_attrs = {
+            'a': ['href','title','target','rel'],
+            'span': ['style'],
+            '*': ['style']
+        }
+        cleaned = bleach.clean(html, tags=allowed_tags, attributes=allowed_attrs, strip=True)
+        return cleaned
+    except Exception:
+        return html
+
 def apply_layout(body, graphs_html_block, stats_html_block, ra_html_block, recs_html_block, subject, server_name):
     # Handle HTML content from Quill editor - only convert newlines if content doesn't contain HTML
     if '<' not in body:
         body = body.replace('\n', '<br>')
-    body = body.replace('[GRAPHS]', graphs_html_block)
-    body = body.replace('[STATS]', stats_html_block)
-    body = body.replace('[RECENTLY_ADDED]', ra_html_block)
-    body = body.replace('[RECOMENDATIONS]', recs_html_block)
+    # Sanitize body (Quill HTML) and dynamic blocks
+    body = sanitize_html(body)
+    body = body.replace('[GRAPHS]', sanitize_html(graphs_html_block))
+    body = body.replace('[STATS]', sanitize_html(stats_html_block))
+    body = body.replace('[RECENTLY_ADDED]', sanitize_html(ra_html_block))
+    body = body.replace('[RECOMENDATIONS]', sanitize_html(recs_html_block))
 
     if subject.startswith(server_name):
         display_subject = subject[len(server_name):].lstrip()
     else:
         display_subject = subject
-    
-    # Get logo settings from database
-    logo_src = "https://d15k2d11r6t6rl.cloudfront.net/public/users/Integrators/669d5713-9b6a-46bb-bd7e-c542cff6dd6a/3bef3c50f13f4320a9e31b8be79c6ad2/Plex%20Logo%20Update%202022/plex-logo-heavy-stroke.png"  # Default
-    logo_width = "40"  # Default
-    
+
+    # Get logo settings from database; default to Asset_45x.png
+    logo_html = ""
+    logo_width_value = "40"
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT logo_filename, logo_width FROM settings WHERE id = 1")
         result = cursor.fetchone()
         conn.close()
-        
-        if result and result[0]:
-            logo_filename = result[0]
-            logo_width = str(result[1]) if result[1] else "40"
-            
-            # Determine logo path based on filename
-            if logo_filename.startswith('logo_'):
-                # Uploaded logo
-                logo_src = f"/static/uploads/logos/{logo_filename}"
-            else:
-                # Static logo
-                logo_src = f"/static/img/{logo_filename}"
+
+        if result:
+            logo_filename = (result[0] or "Asset_45x.png").strip()
+            logo_width_value = str(result[1]) if result[1] else "40"
+            if logo_filename:
+                if logo_filename.startswith('logo_'):
+                    logo_src = f"/static/uploads/logos/{logo_filename}"
+                else:
+                    logo_src = f"/static/img/{logo_filename}"
+                logo_html = f"<img class=\"header-img plex-img\" style=\"display: block; outline: 0; text-decoration: none; height: auto; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%; margin-left: 40em;\" src=\"{logo_src}\" width=\"{logo_width_value}\" />"
     except Exception as e:
         print(f"Error getting logo settings: {e}")
-        # Use default logo if there's an error
 
     return f"""
     <link href="https://fonts.googleapis.com/css?family=IBM+Plex+Sans:400,500,600,700&display=swap" rel="stylesheet">
@@ -1309,7 +1360,7 @@ def apply_layout(body, graphs_html_block, stats_html_block, ra_html_block, recs_
                                 <tbody>
                                     <tr>
                                         <td class="wrapper" style="font-family: IBM Plex Sans; font-size: 14px; vertical-align: top; box-sizing: border-box; padding: 5px; overflow: auto;">
-                                            <div class="header" style="text-align: center; line-height: 0;"><img class="header-img plex-img" style="display: block; outline: 0; text-decoration: none; height: auto; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%; margin-left: 40em;" src="{logo_src}" width="{logo_width}" /></div>
+                                            <div class="header" style="text-align: center; line-height: 0;">{logo_html}</div>
                                             <div class="server-name" style="font-size: 25px; text-align: center; margin-bottom: 0;">{server_name} Newsletter</div>
                                         </td>
                                     </tr>
@@ -1346,7 +1397,7 @@ def run_tautulli_command(base_url, api_key, command, data_type, error, time_rang
             api_url = f"{base_url}/api/v2?apikey={decrypt(api_key)}&cmd={command}&time_range={time_range}"
 
     try:
-        response = requests.get(api_url)
+        response = safe_get(api_url)
         response.raise_for_status()
         data = response.json()
 
@@ -1382,7 +1433,7 @@ def run_conjurr_command(base_url, user_dict, error):
     for user in user_dict.keys():
         try:
             api_url = f"{api_base_url}{user}"
-            response = requests.get(api_url)
+            response = safe_get(api_url)
             response.raise_for_status()
             data = response.json()
 
@@ -1516,7 +1567,7 @@ def _check_github_latest():
 
     url = f"https://api.github.com/repos/{app.config['GITHUB_OWNER']}/{app.config['GITHUB_REPO']}/releases/latest"
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = safe_get(url, headers=headers, timeout=10)
         if r.status_code == 304:
             _update_cache["checked_at"] = time.time()
             return
@@ -1662,13 +1713,7 @@ def index():
         "tautulli_api": decrypt(tautulli_api),
     }
     if logo_filename == '' or logo_filename is None:
-        settings['logo_filename'] = 'Asset_45x.png'
-        cursor.execute("""
-            INSERT INTO settings (id, logo_filename) VALUES (1, 'Asset_45x.png')
-            ON CONFLICT (id) DO UPDATE
-            SET logo_filename = excluded.logo_filename
-        """)
-        conn.commit()
+        settings['logo_filename'] = ''
     else:
         settings['logo_filename'] = logo_filename
     if logo_width == '' or logo_width is None:
@@ -1812,7 +1857,7 @@ def proxy_art(art_path):
     plex_url = settings['plex_url'].rstrip('/')
 
     full_url = f"{plex_url}/{art_path}?X-Plex-Token={decrypt(plex_token)}"
-    r = requests.get(full_url, stream=True)
+    r = safe_get(full_url, stream=True)
     return Response(r.content, content_type=r.headers['Content-Type'])
 
 @app.get("/proxy-img")
@@ -1820,12 +1865,13 @@ def proxy_img():
     url = request.args.get("u", "")
     if not url.startswith(("http://","https://")):
         return Response(status=400)
-    r = requests.get(url, timeout=15)
+    r = safe_get(url, timeout=15)
     ct = r.headers.get("Content-Type", "image/jpeg")
     return Response(r.content, headers={"Content-Type": ct, "Cache-Control": "public, max-age=86400"})
 
 @app.route('/pull_recommendations', methods=['POST'])
 def pull_recommendations():
+    require_csrf_for_json()
     recommendations_json = {}
     error = None
     alert = None
@@ -1888,6 +1934,7 @@ def pull_recommendations():
 
 @app.route('/send_email', methods=['POST'])
 def send_email():
+    require_csrf_for_json()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -2044,10 +2091,14 @@ def settings():
     cursor = conn.cursor()
 
     if request.method == "POST":
+        # CSRF validation
+        token = request.form.get("csrf_token")
+        if not token or token != session.get("csrf_token"):
+            abort(400)
         from_email = request.form.get("from_email")
         alias_email = request.form.get("alias_email")
         reply_to_email = request.form.get("reply_to_email")
-        password = encrypt(request.form.get("password"))
+        submitted_password = (request.form.get("password") or "").strip()
         smtp_username = request.form.get("smtp_username")
         smtp_server = request.form.get("smtp_server")
         smtp_port = int(request.form.get("smtp_port"))
@@ -2055,10 +2106,37 @@ def settings():
         server_name = request.form.get("server_name")
         plex_url = request.form.get("plex_url")
         tautulli_url = request.form.get("tautulli_url")
-        tautulli_api = encrypt(request.form.get("tautulli_api"))
+        submitted_tautulli_api = (request.form.get("tautulli_api") or "").strip()
         conjurr_url = request.form.get("conjurr_url")
         logo_filename = request.form.get("logo_filename")
         logo_width = request.form.get("logo_width")
+
+        # Fetch current encrypted secrets to avoid accidental double-encryption
+        try:
+            cursor.execute("SELECT password, tautulli_api FROM settings WHERE id = 1")
+            current_row = cursor.fetchone() or (None, None)
+        except Exception:
+            current_row = (None, None)
+
+        current_password_enc = current_row[0]
+        current_tautulli_enc = current_row[1]
+        current_password_plain = decrypt(current_password_enc) if current_password_enc else ""
+        current_tautulli_plain = decrypt(current_tautulli_enc) if current_tautulli_enc else ""
+
+        # Determine what to store for secrets (idempotent, avoids re-encrypting unchanged values)
+        if submitted_password == "":
+            password_enc = ""
+        elif submitted_password == current_password_enc or submitted_password == current_password_plain:
+            password_enc = current_password_enc or encrypt(submitted_password)
+        else:
+            password_enc = encrypt(submitted_password)
+
+        if submitted_tautulli_api == "":
+            tautulli_api_enc = ""
+        elif submitted_tautulli_api == current_tautulli_enc or submitted_tautulli_api == current_tautulli_plain:
+            tautulli_api_enc = current_tautulli_enc or encrypt(submitted_tautulli_api)
+        else:
+            tautulli_api_enc = encrypt(submitted_tautulli_api)
 
         cursor.execute("""
             INSERT INTO settings
@@ -2066,7 +2144,7 @@ def settings():
             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE
             SET from_email = excluded.from_email, alias_email = excluded.alias_email, reply_to_email = excluded.reply_to_email, password = excluded.password, smtp_username = excluded.smtp_username, smtp_server = excluded.smtp_server, smtp_port = excluded.smtp_port, smtp_protocol = excluded.smtp_protocol, server_name = excluded.server_name, plex_url = excluded.plex_url, tautulli_url = excluded.tautulli_url, tautulli_api = excluded.tautulli_api, conjurr_url = excluded.conjurr_url, logo_filename = excluded.logo_filename, logo_width = excluded.logo_width
-        """, (from_email, alias_email, reply_to_email, password, smtp_username, smtp_server, smtp_port, smtp_protocol, server_name, plex_url, tautulli_url, tautulli_api, conjurr_url, logo_filename, logo_width))
+        """, (from_email, alias_email, reply_to_email, password_enc, smtp_username, smtp_server, smtp_port, smtp_protocol, server_name, plex_url, tautulli_url, tautulli_api_enc, conjurr_url, logo_filename, logo_width))
         conn.commit()
         cursor.execute("SELECT plex_token FROM settings WHERE id = 1")
         plex_token = cursor.fetchone()[0]
@@ -2076,7 +2154,7 @@ def settings():
             "from_email": from_email,
             "alias_email": alias_email,
             "reply_to_email": reply_to_email,
-            "password": decrypt(password),
+            "password": decrypt(password_enc),
             "smtp_username": smtp_username,
             "smtp_server": smtp_server,
             "smtp_port": smtp_port,
@@ -2085,7 +2163,7 @@ def settings():
             "plex_url": plex_url,
             "plex_token": plex_token,
             "tautulli_url": tautulli_url,
-            "tautulli_api": decrypt(tautulli_api),
+            "tautulli_api": decrypt(tautulli_api_enc),
             "conjurr_url": conjurr_url,
             "logo_filename": logo_filename,
             "logo_width": logo_width
@@ -2172,7 +2250,10 @@ def settings():
         settings["logo_width"] = int(logo_width)
     
     conn.close()
-    return render_template('settings.html', settings=settings)
+    # Issue a CSRF token for forms
+    if not session.get("csrf_token"):
+        session["csrf_token"] = secrets.token_urlsafe(32)
+    return render_template('settings.html', settings=settings, nonce=secrets.token_urlsafe(16), csrf_token=session["csrf_token"])
 
 @app.post('/api/plex/pin')
 def plex_create_pin():
@@ -2238,7 +2319,7 @@ def plex_get_info():
         "X-Plex-Token": decrypt(token)
     }
     
-    response = requests.get(url, headers=headers)
+    response = safe_get(url, headers=headers)
     data = response.json()
 
     cursor.execute("""
@@ -2350,6 +2431,7 @@ def scheduling():
 
 @app.route('/scheduling/create', methods=['POST'])
 def create_schedule():
+    require_csrf_for_json()
     try:
         data = request.get_json()
         name = data.get('name', '').strip()
@@ -2407,6 +2489,7 @@ def delete_schedule(schedule_id):
 
 @app.route('/scheduling/<int:schedule_id>/send-now', methods=['POST'])
 def send_schedule_now(schedule_id):
+    require_csrf_for_json()
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -2450,6 +2533,7 @@ def send_schedule_now(schedule_id):
 
 @app.route('/scheduling/<int:schedule_id>/toggle', methods=['POST'])
 def toggle_schedule(schedule_id):
+    require_csrf_for_json()
     try:
         data = request.get_json()
         is_active = data.get('is_active', True)
@@ -2811,6 +2895,7 @@ def get_calendar_data():
 
 @app.route('/clear_cache', methods=['POST'])
 def clear_cache_route():
+    require_csrf_for_json()
     clear_cache()
     return jsonify({"status": "success", "message": "Cache cleared successfully"})
 
@@ -2835,6 +2920,7 @@ def get_email_lists():
 
 @app.route('/email_lists', methods=['POST'])
 def save_email_list_route():
+    require_csrf_for_json()
     try:
         data = request.get_json()
         name = data.get('name', '').strip()
@@ -2887,6 +2973,7 @@ def get_email_templates():
 
 @app.route('/email_templates', methods=['POST'])
 def save_email_template():
+    require_csrf_for_json()
     try:
         data = request.get_json()
         name = data.get('name', '').strip()
@@ -2941,6 +3028,10 @@ def delete_email_template(template_id):
 
 @app.route('/upload-logo', methods=['POST'])
 def upload_logo():
+    if request.content_type and request.content_type.startswith('multipart/form-data'):
+        token = request.form.get('csrf_token')
+        if not token or token != session.get('csrf_token'):
+            abort(400)
     """Handle logo file upload with validation"""
     try:
         # Check if file was uploaded
@@ -3020,7 +3111,8 @@ def upload_logo():
 
 @app.route('/delete-logo', methods=['POST'])
 def delete_logo():
-    """Delete current logo and reset to default"""
+    require_csrf_for_json()
+    """Delete current logo and clear to no logo"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -3030,28 +3122,28 @@ def delete_logo():
         result = cursor.fetchone()
         current_logo = result[0] if result else None
         
-        if current_logo and current_logo != 'Asset_45x.png':
+        if current_logo:
             # Delete the uploaded logo file
             logo_path = os.path.join(app.static_folder, 'uploads', 'logos', current_logo)
             if os.path.exists(logo_path):
                 os.remove(logo_path)
             
-            # Reset to default logo
+            # Clear to no logo
             cursor.execute("""
                 UPDATE settings 
-                SET logo_filename = 'Asset_45x.png', logo_width = 80 
+                SET logo_filename = '', logo_width = 80 
                 WHERE id = 1
             """)
             conn.commit()
             
             return jsonify({
                 "status": "success", 
-                "message": "Logo deleted and reset to default"
+                "message": "Logo removed"
             })
         else:
             return jsonify({
                 "status": "info", 
-                "message": "Already using default logo"
+                "message": "No logo set"
             })
             
     except Exception as e:

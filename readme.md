@@ -214,6 +214,16 @@ Released under the **MIT License** – see [LICENSE](LICENSE) for details.
 
 ## Recent Changes
 
+### v0.9.14
+* Added WYSIWYG editor for rich text formatting in email templates
+* Implemented custom logo upload functionality with preview and management
+* Enhanced security with CSRF token protection on POST endpoints
+* Added request timeouts and improved security headers
+* Improved secrets handling with masking in logs and configuration
+* HTML content sanitization for enhanced security
+* Added Dockerfile and docker-compose.yml for containerized deployment
+* Updated .gitignore for better file management
+
 ### v0.9.13
 * Adjusted tautulli API error reporting
 * Fixed app crash when Tautulli settings are missing - thank you dreondre!

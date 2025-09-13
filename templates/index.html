@@ -894,7 +894,15 @@
                                                         <tbody>
                                                             <tr>
                                                                 <td class="wrapper" style="font-family: IBM Plex Sans; font-size: 14px; vertical-align: top; box-sizing: border-box; padding: 5px; overflow: auto;">
-                                                                    <div class="header" style="text-align: center; line-height: 0;"><img class="header-img" style="display: block; outline: 0; text-decoration: none; height: 50px; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%;" src="{% if settings.logo_filename and settings.logo_filename != 'Asset_45x.png' %}/static/uploads/logos/{{ settings.logo_filename }}{% else %}/static/img/{{ settings.logo_filename }}{% endif %}" /></div>
+                                                                    <div class="header" style="text-align: center; line-height: 0;">
+                                                                        {% if settings.logo_filename %}
+                                                                            {% if settings.logo_filename.startswith('logo_') %}
+                                                                                <img class="header-img" style="display: block; outline: 0; text-decoration: none; height: 50px; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%;" src="/static/uploads/logos/{{ settings.logo_filename }}" />
+                                                                            {% else %}
+                                                                                <img class="header-img" style="display: block; outline: 0; text-decoration: none; height: 50px; border: 0; -ms-interpolation-mode: bicubic; max-width: 100%;" src="/static/img/{{ settings.logo_filename }}" />
+                                                                            {% endif %}
+                                                                        {% endif %}
+                                                                    </div>
                                                                     <div class="server-name" style="font-size: 25px; text-align: center; margin-bottom: 0;">${serverName} Newsletter</div>
                                                                 </td>
                                                             </tr>
@@ -2161,7 +2169,7 @@
                 try {
                     const resp = await fetch('/pull_recommendations', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Accept': 'text/html' },
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'text/html', 'X-CSRF-Token': '{{ csrf_token }}' },
                         body: JSON.stringify(payload),
                         credentials: 'same-origin'
                     });
